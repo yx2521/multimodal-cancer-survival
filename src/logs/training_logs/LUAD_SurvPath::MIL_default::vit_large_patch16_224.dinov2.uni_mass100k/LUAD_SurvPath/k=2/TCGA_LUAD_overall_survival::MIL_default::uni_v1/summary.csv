@@ -1,0 +1,2 @@
+bag_size_test,surv_loss_test,loss_test,uncensored_loss_test,censored_loss_test,c_index_test
+2717.7,2.1907092952962897,2.1907092952962897,1.6520194683223963,1.0773796539477871,0.5564356435643565
