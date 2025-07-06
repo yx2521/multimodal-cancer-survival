@@ -132,8 +132,9 @@ class WSISurvivalDataset(Dataset):
         """
         self.feats_df = pd.concat([df_sdir(feats_dir, cols=['fpath', 'fname', self.slide_col]) for feats_dir in self.data_source]).drop(['fname'], axis=1).reset_index(drop=True)
         
-        # 添加这一行
-        self.feats_df[self.slide_col] = self.feats_df[self.slide_col].str.replace('_0_1024', '')
+        # Extract the slide id from the feature path
+        # self.feats_df[self.slide_col] = self.feats_df[self.slide_col].str.replace('_0_1024', '')
+        self.feats_df[self.slide_col] = self.feats_df[self.slide_col].str.replace(r'_0_(1024|2048)$', '', regex=True)
 
         missing_feats_in_split = series_diff(self.data_df[self.slide_col], self.feats_df[self.slide_col])
 
@@ -275,13 +276,13 @@ class WSISurvivalDataset(Dataset):
         
         feat_paths = self.get_feat_paths(idx)
         for feat_path in feat_paths:
-            if feat_path.endswith('.npy'):                    # 新增：NPY处理
+            if feat_path.endswith('.npy'):                    # apapt npy files
                 content = np.load(feat_path, allow_pickle=True)
                 if isinstance(content.item(), dict):
                     features = content[()]['feature']
                 else:
                     features = content
-            elif self.use_h5:                                 # if 改为 elif
+            elif self.use_h5:                                 # if --> elif
                 with h5py.File(feat_path, 'r') as f:
                     features = f['features'][:]
             else:
@@ -345,6 +346,7 @@ class WSIOmicsSurvivalDataset(WSISurvivalDataset):
                  df_histo,
                  df_gene,
                  data_source,
+                 df_mutation=None,  # add mutation data
                  target_transform=None,
                  sample_col='case_id',
                  slide_col='slide_id',
@@ -364,17 +366,60 @@ class WSIOmicsSurvivalDataset(WSISurvivalDataset):
                        survival_time_col, censorship_col, n_label_bins, label_bins, bag_size, include_surv_t0,
                        lazy_init=True)
 
+        # Mutation data is optional, if not provided, it will be set to None
+        self.mutation_data = None
+
         # Get the intersection of histo and gene df
         self.omics_data = df_gene[~df_gene['case_id'].duplicated()]
 
-        sample_list = np.intersect1d(np.unique(self.omics_data['case_id'].values), np.unique(self.data_df['case_id'].values))        
+
+        # Add mutation data if provided
+        if df_mutation is not None:
+            # adapt mutation data
+            df_mutation = df_mutation.rename(columns={'sample': 'case_id'})
+            self.mutation_data = df_mutation[~df_mutation['case_id'].duplicated()]
+            self.mutation_data = self.mutation_data.set_index('case_id')
+            
+            # get the intersection of histo, omics and mutation data
+            omics_ids = self.omics_data['case_id'].astype(str).values
+            histo_ids = self.data_df['case_id'].astype(str).values
+            
+            # clean mutation IDs
+            mutation_ids = self.mutation_data.index.astype(str).values
+            mutation_ids_clean = [id_str.rsplit('-', 1)[0] for id_str in mutation_ids]
+            
+            # get the intersection of all three datasets
+            sample_list = np.intersect1d(omics_ids, histo_ids)
+            sample_list = np.intersect1d(sample_list, mutation_ids_clean)
+            
+            # create a mapping from cleaned mutation IDs to original IDs
+            clean_to_original = dict(zip(mutation_ids_clean, mutation_ids))
+            
+            # reset the index of mutation data to cleaned IDs
+            self.mutation_data.index = mutation_ids_clean
+            self.mutation_data = self.mutation_data.groupby(self.mutation_data.index).sum()
+            
+        else:
+            # bimodal: only histo and omics data
+            omics_ids = self.omics_data['case_id'].astype(str).values
+            histo_ids = self.data_df['case_id'].astype(str).values
+            sample_list = np.intersect1d(omics_ids, histo_ids)
+            
         sample_list = sorted(sample_list)
+
+        #######
+
 
         # Get histo df of intersection
         self.construct_df(sample_list)
         # Get gene df of intersection
         self.omics_data = self.omics_data[self.omics_data['case_id'].isin(sample_list)].sort_values(by=['case_id'])
         self.omics_data = self.omics_data.set_index('case_id')
+
+        # adapt mutation data if provided
+        if self.mutation_data is not None:
+            self.mutation_data = self.mutation_data[self.mutation_data.index.isin(sample_list)]
+        ######
 
         self.omics_dir = omics_dir
         self.omics_modality = omics_modality
@@ -464,5 +509,15 @@ class WSIOmicsSurvivalDataset(WSISurvivalDataset):
             raise NotImplementedError(f"Not Implemented for {self.omics_modality}")
 
         out['omics'] = omics_list
+
+        # add mutation data if available
+        if self.mutation_data is not None:
+            mutation_list = []
+            for i in range(len(self.omic_names)):  # same 50 pathways
+                mutation_list.append(torch.tensor(self.mutation_data.loc[case_id, self.omic_names[i]]))
+            out['mutations'] = mutation_list
+        # else:
+        #     out['mutations'] = None
+        ##########
 
         return out

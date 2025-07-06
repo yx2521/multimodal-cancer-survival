@@ -27,6 +27,7 @@ class WSIProtoDataset(Dataset):
         #     assert os.path.basename(src) in ['feats_h5', 'feats_pt']
         #     self.use_h5 = True if os.path.basename(src) == 'feats_h5' else False
         #     self.data_source.append(src)
+        # change to adapt npy embeddings
         for src in data_source:
             assert os.path.isdir(src), f"Data source directory {src} does not exist"
             
@@ -65,8 +66,9 @@ class WSIProtoDataset(Dataset):
         """
         self.feats_df = pd.concat([df_sdir(feats_dir, cols=['fpath', 'fname', self.slide_col]) for feats_dir in self.data_source]).drop(['fname'], axis=1).reset_index(drop=True)
         
-        # 添加这一行
-        self.feats_df[self.slide_col] = self.feats_df[self.slide_col].str.replace('_0_1024', '')
+        # Extract the slide id from the feature path
+        # self.feats_df[self.slide_col] = self.feats_df[self.slide_col].str.replace('_0_1024', '')
+        self.feats_df[self.slide_col] = self.feats_df[self.slide_col].str.replace(r'_0_(1024|2048)$', '', regex=True)
 
         missing_feats_in_split = series_diff(self.data_df[self.slide_col], self.feats_df[self.slide_col])
 
@@ -129,13 +131,13 @@ class WSIProtoDataset(Dataset):
         all_features = []
         all_coords = []
         for feat_path in feat_paths:
-            if feat_path.endswith('.npy'):                    # 新增：NPY处理
+            if feat_path.endswith('.npy'):                
                 content = np.load(feat_path, allow_pickle=True)
                 if isinstance(content.item(), dict):
                     features = content[()]['feature']
                 else:
                     features = content
-            elif self.use_h5:                                 # if 改为 elif
+            elif self.use_h5:                               
                 with h5py.File(feat_path, 'r') as f:
                     features = f['features'][:]
             else:
@@ -152,15 +154,5 @@ class WSIProtoDataset(Dataset):
             'coords': all_coords}
         
 
-    # # 在返回之前添加调试
-    #     if idx == 0:  # 只调试第一个样本
-    #         print(f"__getitem__ 调试 - idx={idx}")
-    #         print(f"all_features形状: {all_features.shape}")
-    #         print(f"all_features统计: mean={all_features.mean():.6f}, std={all_features.std():.6f}")
-    #         print(f"前3个patch均值: {[all_features[i].mean().item() for i in range(3)]}")
-            
-    #         # 检查是否在这里被异常处理了
-    #         if all_features.std() < 1e-6:
-    #             print("🚨 __getitem__ 中特征方差太小！")
         
         return out
