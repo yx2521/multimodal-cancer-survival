@@ -61,6 +61,7 @@ def create_embedding_model(args, mode='classification', config_dir='./configs'):
     return model
 
 
+# Include mutation in the model creation function
 def create_multimodal_survival_model(args, omic_sizes=[]):
     if args.loss_fn == 'nll':
         num_classes = args.n_label_bins
@@ -69,11 +70,7 @@ def create_multimodal_survival_model(args, omic_sizes=[]):
     elif args.loss_fn == 'rank':
         num_classes = 1
 
-    if args.model_mm_type in ['coattn', 'gene', 'histo']:   # This enables self-attn/coattn within/across modalities
-        #
-        # ex 1: Coattn across both modalities - modality: 'both' args.model_mm_type: 'coattn' num_coattn_layers: 1
-        # ex 2: Self-attn within a modality - modality: 'both' args.model_mm_type: 'histo' or 'gene'
-        #
+    if args.model_mm_type in ['coattn', 'gene', 'histo']:
         model = coattn(omic_sizes=omic_sizes,
                        histo_in_dim=args.feat_dim,
                        path_proj_dim=256,
@@ -84,6 +81,7 @@ def create_multimodal_survival_model(args, omic_sizes=[]):
                        histo_model=args.model_histo_type,
                        append_embed=args.append_embed,
                        net_indiv=args.net_indiv,
+                       include_mutation=getattr(args, 'include_mutation', False)
                        )
 
     elif args.model_mm_type == 'survpath':
@@ -97,6 +95,7 @@ def create_multimodal_survival_model(args, omic_sizes=[]):
                        histo_model='mil',
                        append_embed=None,
                        net_indiv=False,
+                       include_mutation=getattr(args, 'include_mutation', False) 
                        )
 
     elif args.model_mm_type == 'coattn_mot':
@@ -110,6 +109,7 @@ def create_multimodal_survival_model(args, omic_sizes=[]):
                             histo_model=args.model_histo_type,
                             append_embed=args.append_embed,
                             net_indiv=args.net_indiv,
+                            include_mutation=getattr(args, 'include_mutation', False)
                             )
 
     return model

@@ -145,7 +145,9 @@ class coattn(nn.Module):
             append_embed='none',
             mult=1,
             net_indiv=False,
-            numOfproto=16):
+            numOfproto=16,
+            include_mutation=False # Additional mutation pathways
+            ):
         """
         The central co-attention module where you can do it all!
 
@@ -180,6 +182,17 @@ class coattn(nn.Module):
         self.histo_model = histo_model.lower()
 
         self.sig_networks = init_per_path_model(omic_sizes)
+
+        # Additional mutation pathways
+        if include_mutation:
+            self.mutation_networks = init_per_path_model(omic_sizes)
+            self.include_mutation = True
+        else:
+            self.include_mutation = False
+        ########
+
+
+
         self.identity = nn.Identity()  # use this layer to calculate ig
 
         self.append_embed = append_embed
@@ -200,15 +213,24 @@ class coattn(nn.Module):
             self.gene_embedding = None
 
 
+
         coattn_list = []
         if self.num_coattn_layers == 0:
             out_dim = self.path_proj_dim
 
+        
+
+        # Additional mutation pathways
             if self.net_indiv:  # Individual MLP per prototype
+                # Calculate total number of tokens
+                num_tokens = self.numOfproto + len(omic_sizes)
+                if self.include_mutation:
+                    num_tokens += len(omic_sizes)  # mutation pathways
+                    
                 feed_forward = FeedForwardEnsemble(out_dim,
-                                                   self.out_mult,
-                                                   dropout=dropout,
-                                                   num=self.numOfproto + len(omic_sizes))
+                                                self.out_mult,
+                                                dropout=dropout,
+                                                num=num_tokens)  # new num_tokens
             else:
                 feed_forward = FeedForward(out_dim, self.out_mult, dropout=dropout)
 
@@ -218,51 +240,64 @@ class coattn(nn.Module):
             out_dim = self.path_proj_dim // 2
             out_mult = self.out_mult
             
-            if self.modality in ['histo', 'gene']: # If we want to use only single modality + self-attention
+            if self.modality in ['histo', 'gene']:
                 attn_mode = 'self'
-            elif self.modality == 'survpath':    # SurvPath setting H->P, P->H, P->P
+            elif self.modality == 'survpath':
                 attn_mode = 'partial'
             else:
-                attn_mode = 'full'  # Otherwise, perform self & cross attention
+                attn_mode = 'full'
 
+            actual_num_pathways = self.num_pathways * 2 if self.include_mutation else self.num_pathways
             cross_attender = MMAttentionLayer(
                 dim=self.path_proj_dim,
                 dim_head=out_dim,
                 heads=1,
                 residual=False,
                 dropout=0.1,
-                num_pathways=self.num_pathways,
+                # num_pathways=self.num_pathways,
+                num_pathways=actual_num_pathways,
                 attn_mode=attn_mode
             )
 
             if self.net_indiv:  # Individual MLP per prototype
+                # Calculate total number of tokens
+                num_tokens = self.numOfproto + len(omic_sizes)
+                if self.include_mutation:
+                    num_tokens += len(omic_sizes)  # Add mutation pathways
+                    
                 feed_forward = FeedForwardEnsemble(out_dim,
-                                                   out_mult,
-                                                   dropout=dropout,
-                                                   num=self.numOfproto + len(omic_sizes))
+                                                out_mult,
+                                                dropout=dropout,
+                                                num=num_tokens)  # New num_tokens
             else:
                 feed_forward = FeedForward(out_dim, out_mult, dropout=dropout)
 
             layer_norm = nn.LayerNorm(int(out_dim * out_mult))
             coattn_list.extend([cross_attender, feed_forward, layer_norm])
 
-
+        ########
+        
         self.coattn = nn.Sequential(*coattn_list)
 
+        # Additional mutation pathways
         out_dim_final = int(out_dim * self.out_mult)
         histo_final_dim = out_dim_final * self.numOfproto if self.histo_agg == 'cat' else out_dim_final
         gene_final_dim = out_dim_final
-
+        mutation_final_dim = out_dim_final if self.include_mutation else 0
+        
         if self.modality == 'histo':
             in_dim = histo_final_dim
         elif self.modality == 'gene':
             in_dim = gene_final_dim
         else:
-            in_dim = histo_final_dim + gene_final_dim
-
+            in_dim = histo_final_dim + gene_final_dim + mutation_final_dim
+        
         self.classifier = nn.Linear(in_dim, self.num_classes, bias=False)
+        ##########
 
-    def forward_no_loss(self, x_path, x_omics, return_attn=False):
+    def forward_no_loss(self, x_path, x_omics, 
+                        x_mutations=None,  # Add this parameter for mutation pathways
+                        return_attn=False):
         """
         Args:
             x_path: (B, numOfproto, in_dim) in_dim = [prob, mean, cov] (If OT, prob will be uniform, cov will be none)
@@ -278,6 +313,32 @@ class coattn(nn.Module):
             omic_feat = self.sig_networks[idx](sig_feat.float())  # (B, d)
             h_omic.append(omic_feat)
         h_omic = torch.stack(h_omic, dim=1)
+
+        # Add positional embedding to mutation pathways
+        h_mutation = None
+
+        if x_mutations is not None and self.include_mutation:
+            h_mutation = []
+            for idx, mut_feat in enumerate(x_mutations):
+                mut_feat = self.mutation_networks[idx](mut_feat.float())
+                h_mutation.append(mut_feat)
+            h_mutation = torch.stack(h_mutation, dim=1)
+
+        # New: Append gene prototype encoding to mutation pathways
+        if self.gene_embedding is not None and h_mutation is not None and self.include_mutation:
+            arr = []
+            for idx in range(len(h_mutation)):
+                arr.append(torch.cat([h_mutation[idx:idx + 1], self.gene_embedding.to(device)], dim=-1))
+            h_mutation = torch.cat(arr, dim=0)
+
+        # Independen mutation embedding (worse performance)
+        # if hasattr(self, 'mutation_embedding') and self.mutation_embedding is not None and h_mutation is not None:
+        #     arr = []
+        #     for idx in range(len(h_mutation)):
+        #         arr.append(torch.cat([h_mutation[idx:idx + 1], self.mutation_embedding.to(device)], dim=-1))
+        #     h_mutation = torch.cat(arr, dim=0)
+
+        #########
 
         if self.gene_embedding is not None: # Append gene prototype encoding
             arr = []
@@ -295,55 +356,86 @@ class coattn(nn.Module):
                 arr.append(torch.cat([h_path[idx:idx + 1], self.histo_embedding.to(device)], dim=-1))
             h_path = torch.cat(arr, dim=0)
 
-        tokens = torch.cat([h_omic, h_path], dim=1) # (B, N_p+N_h, d)
+        # tokens = torch.cat([h_omic, h_path], dim=1) # (B, N_p+N_h, d)
+        # tokens = self.identity(tokens)
+
+        # # Required for visualization
+        # if return_attn:
+        #     with torch.no_grad():
+        #         _, attn_pathways, cross_attn_pathways, cross_attn_histology = self.coattn[0](x=tokens, mask=None, return_attention=True)
+
+        # # Construct the token set for co-attention
+        # if x_mutations is not None and self.include_mutation:
+        #     tokens = torch.cat([h_omic, h_mutation, h_path], dim=1)
+        #     num_pathways_total = self.num_pathways * 2  # RNA + Mutation pathways
+        # else:
+        #     tokens = torch.cat([h_omic, h_path], dim=1)
+        #     num_pathways_total = self.num_pathways
+
+        # Construct the token set for co-attention
+        if x_mutations is not None and self.include_mutation:
+            tokens = torch.cat([h_omic, h_mutation, h_path], dim=1)
+            num_pathways_total = self.num_pathways * 2  # RNA + Mutation pathways
+        else:
+            tokens = torch.cat([h_omic, h_path], dim=1)
+            num_pathways_total = self.num_pathways
+
         tokens = self.identity(tokens)
 
         # Required for visualization
         if return_attn:
             with torch.no_grad():
                 _, attn_pathways, cross_attn_pathways, cross_attn_histology = self.coattn[0](x=tokens, mask=None, return_attention=True)
+        # #########
+
+
 
         # Pass the token set through co-attention network
         mm_embed = self.coattn(tokens)
 
-        # ---> aggregate
-        # Pathways
-        paths_postSA_embed = mm_embed[:, :self.num_pathways, :]
-        paths_postSA_embed = torch.mean(paths_postSA_embed, dim=1)
 
-        # Histology
-        wsi_postSA_embed = mm_embed[:, self.num_pathways:, :]
-        if self.histo_model == 'mil':
-            wsi_postSA_embed = torch.mean(wsi_postSA_embed, dim=1)  # For non-prototypes, we just take the mean
+        # Additional mutation pathways
+        if x_mutations is not None and self.include_mutation and h_mutation is not None:
+            # RNA pathways
+            rna_embed = mm_embed[:, :self.num_pathways, :]
+            rna_embed = torch.mean(rna_embed, dim=1)
+            
+            # Mutation pathways
+            mut_embed = mm_embed[:, self.num_pathways:self.num_pathways*2, :]
+            mut_embed = torch.mean(mut_embed, dim=1)
+            
+            # WSI
+            wsi_embed = mm_embed[:, self.num_pathways*2:, :]
+            wsi_embed = agg_histo(wsi_embed, self.histo_agg)
+            
+            embedding = torch.cat([rna_embed, mut_embed, wsi_embed], dim=1)
         else:
+            # Original bimodal Logic
+            paths_postSA_embed = mm_embed[:, :self.num_pathways, :]
+            paths_postSA_embed = torch.mean(paths_postSA_embed, dim=1)
+            
+            wsi_postSA_embed = mm_embed[:, self.num_pathways:, :]
             wsi_postSA_embed = agg_histo(wsi_postSA_embed, self.histo_agg)
-
-        if self.modality == 'histo':    # Just use histo for prediction
-            embedding = wsi_postSA_embed
-        elif self.modality == 'gene':   # Just use gene for prediction
-            embedding = paths_postSA_embed
-        else:   # Use both modalities
-            embedding = torch.cat([paths_postSA_embed, wsi_postSA_embed], dim=1)  # ---> both branches
-
+            
+            embedding = torch.cat([paths_postSA_embed, wsi_postSA_embed], dim=1)
+        
         logits = self.classifier(embedding)
         out = {'logits': logits}
         if return_attn:
             out['omic_attn'] = attn_pathways
             out['cross_attn'] = cross_attn_pathways
             out['path_attn'] = cross_attn_histology
-
         return out
+        ########
 
-
-    def forward(self, x_path, x_omics, return_attn=False, attn_mask=None, label=None, censorship=None, loss_fn=None):
-
-        out = self.forward_no_loss(x_path, x_omics, return_attn)
+    # New: Forward method with loss calculation
+    def forward(self, x_path, x_omics, x_mutations=None, return_attn=False, attn_mask=None, label=None, censorship=None, loss_fn=None):
+        out = self.forward_no_loss(x_path, x_omics, x_mutations, return_attn)
         results_dict, log_dict = process_surv(out['logits'], label, censorship, loss_fn)
         if return_attn:
             results_dict['omic_attn'] = out['omic_attn']
             results_dict['cross_attn'] = out['cross_attn']
             results_dict['path_attn'] = out['path_attn']
-
         results_dict.update(out)
         return results_dict, log_dict
 
@@ -442,6 +534,7 @@ class coattn_mot(nn.Module):
                                                self.out_mult,
                                                dropout=dropout,
                                                num=self.numOfproto + len(omic_sizes))
+
         else:
             feed_forward = FeedForward(out_dim, self.out_mult, dropout=dropout)
 
@@ -534,6 +627,20 @@ class coattn_mot(nn.Module):
 
         logits = self.classifier(embedding)
         out = {'logits': logits}
+
+
+        ##########
+        # Required for visualization
+        if return_attn:
+            with torch.no_grad():
+                _, attn_pathways, cross_attn_pathways, cross_attn_histology = self.coattn[0](x=tokens, mask=None, return_attention=True)
+
+        if return_attn:
+            out['omic_attn'] = attn_pathways
+            out['cross_attn'] = cross_attn_pathways
+            out['path_attn'] = cross_attn_histology
+        ##########
+
 
         return out
 
