@@ -39,11 +39,11 @@ def train(datasets, args):
     
     writer = wandb.init(
         project="mmp_final",
-        name=f"k={fold_k}",  # 简洁的命名，匹配您图中的图例
+        name=f"k={fold_k}",
         config=vars(args),
         tags=[f"fold_{fold_k}", args.model_histo_type, args.model_mm_type, args.task.split('_')[0]],
-        group=f"{args.task}_{args.model_histo_type}_{args.model_mm_type}",  # 将所有fold归组
-        reinit=True  # 允许多次初始化
+        group=f"{args.task}_{args.model_histo_type}_{args.model_mm_type}",  # Grouping runs
+        reinit=True 
     ) if hasattr(args, 'wandb_project') and args.wandb_project else None
     ######
 
@@ -94,6 +94,8 @@ def train(datasets, args):
         omic_sizes = []
 
     model = create_multimodal_survival_model(args, omic_sizes=omic_sizes)
+    print("Model include_mutation:", getattr(model, 'include_mutation', False))  # 加这行
+
     model.to(device)
     
     print_network(model)
@@ -124,7 +126,7 @@ def train(datasets, args):
         train_results = train_loop_survival(model, datasets['train'], optimizer, lr_scheduler, loss_fn,
                                             print_every=args.print_every, accum_steps=args.accum_steps)
         
-        # 添加这部分 - 记录训练指标
+        # wandb logging
         if writer:
             writer.log({
                 'epoch': epoch,
@@ -139,7 +141,7 @@ def train(datasets, args):
             print('#' * 11, f'VAL Epoch: {epoch}', '#' * 11)
             val_results, _ = validate_survival(model, datasets['val'], loss_fn,
                                                    print_every=args.print_every, verbose=True)
-            # 记录验证指标
+            # wandb logging
             if writer:
                 writer.log({
                     'val_loss': val_results.get('loss', 0), 
@@ -174,10 +176,11 @@ def train(datasets, args):
     for k, loader in datasets.items():
         print(f'End of training. Evaluating on Split {k.upper()}...:')
         return_attn = True # True for MMP
+        # return_attn = False # False for SurvPath       
         results[k], dumps[k] = validate_survival(model, loader, loss_fn, print_every=args.print_every,
                                                      dump_results=True, return_attn=return_attn, verbose=False)
         ######
-        # 记录最终结果
+        # wandb logging
         if writer:
             writer.log({
                 f'final_{k}_c_index': results[k].get('c_index', 0),
@@ -215,8 +218,14 @@ def train_loop_survival(model, loader, optimizer, lr_scheduler, loss_fn=None,
         attn_mask = batch['attn_mask'].to(device) if ('attn_mask' in batch) else None
 
         omics = safe_list_to(batch['omics'], device)
+        
+        # Add mutation data handling
+        # mutations = safe_list_to(batch['mutations'], device) if batch['mutations'][0] is not None else None
+        # out, log_dict = model(data, omics, mutations, attn_mask=attn_mask, label=label, censorship=censorship, loss_fn=loss_fn)
+        mutations = safe_list_to(batch['mutations'], device) if 'mutations' in batch else None
+        out, log_dict = model(data, omics, mutations, attn_mask=attn_mask, label=label, censorship=censorship, loss_fn=loss_fn)
 
-        out, log_dict = model(data, omics, attn_mask=attn_mask, label=label, censorship=censorship, loss_fn=loss_fn)
+        #####
 
         if out['loss'] is None:
             continue
@@ -268,21 +277,32 @@ def validate_survival(model, loader,
                       return_attn=False,
                       verbose=1):
     model.eval()
+
+
+
     meters = {'bag_size': AverageMeter()}
     bag_size_meter = meters['bag_size']
     all_risk_scores, all_censorships, all_event_times = [], [], []
     all_omic_attn, all_cross_attn, all_path_attn = [], [], []
 
+
+    # Add mutation data handling
     for batch_idx, batch in enumerate(loader):
         data = batch['img'].to(device)
         label = batch['label'].to(device)
         omics = safe_list_to(batch['omics'], device)
-
         event_time = batch['survival_time'].to(device)
         censorship = batch['censorship'].to(device)
         attn_mask = batch['attn_mask'].to(device) if ('attn_mask' in batch) else None
         
-        out, log_dict = model(data, omics, attn_mask=attn_mask, label=label, censorship=censorship, loss_fn=loss_fn, return_attn=return_attn)
+        mutations = safe_list_to(batch['mutations'], device) if 'mutations' in batch else None
+        out, log_dict = model(data, omics, mutations, attn_mask=attn_mask, label=label, censorship=censorship, loss_fn=loss_fn, return_attn=return_attn)
+    #######
+
+
+
+
+
         if return_attn:
             all_omic_attn.append(out['omic_attn'].detach().cpu().numpy())
             all_cross_attn.append(out['cross_attn'].detach().cpu().numpy())

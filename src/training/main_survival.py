@@ -98,6 +98,15 @@ def main(args):
                       omics_dir=args.omics_dir,
                       omics_modality=args.omics_modality
                       )
+    
+
+    # Add mutation data processing if specified
+    if getattr(args, 'include_mutation', False):
+        cancer_type = args.split_dir.split('/')[-1].split('_')[1]  # 'TCGA_BRCA_overall_survival_k=0' => 'BRCA'
+        mutation_file = j_(args.mutations_dir, cancer_type, f'{cancer_type.lower()}_mutation_impact_weighted.csv') # gives the best results
+        df_mutation = pd.read_csv(mutation_file)
+        train_kwargs['df_mutation'] = df_mutation
+        val_kwargs['df_mutation'] = df_mutation
 
     all_results, all_dumps = {}, {}
 
@@ -108,8 +117,12 @@ def main(args):
                                     model_type=args.model_histo_type,
                                     batch_size=args.batch_size,
                                     num_workers=args.num_workers,
-                                    train_kwargs=train_kwargs,
-                                    val_kwargs=val_kwargs)
+                                    train_kwargs=train_kwargs,  # Here we pass df_mutation if include_mutation is True
+                                    val_kwargs=val_kwargs)      # Here we pass df_mutation if include_mutation is True
+
+    ###########
+
+
 
     fold_results, fold_dumps = train(dataset_splits, args)
 
@@ -196,6 +209,13 @@ parser.add_argument('--omics_dir', default='./data_csvs/rna')
 parser.add_argument('--omics_modality', default='pathway')
 parser.add_argument('--type_of_path', default='hallmarks')
 
+# Add mutation args
+parser.add_argument('--include_mutation', action='store_true', default=False,
+                    help='Include mutation data in multimodal fusion')
+parser.add_argument('--mutations_dir', default='./data_csvs/mutations',
+                    help='Directory containing mutation data')
+#########
+
 # Prototype related
 parser.add_argument('--load_proto', action='store_true', default=False)
 parser.add_argument('--proto_path', type=str)
@@ -238,6 +258,8 @@ parser.add_argument('--tags', nargs='+', type=str, default=None,
 
 parser.add_argument('--wandb_project', default='mmp_final')
 args = parser.parse_args()
+
+
 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
