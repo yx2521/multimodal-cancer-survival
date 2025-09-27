@@ -1,0 +1,9 @@
+# Set the language for Jupyter Notebooks to Python
+*.ipynb linguist-language=Python
+
+# Exclude data files from language statistics
+*.csv linguist-detectable=false
+*.tsv linguist-detectable=false
+*.json linguist-detectable=false
+*.txt linguist-detectable=false
+*.h5 linguist-detectable=false
